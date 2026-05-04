@@ -3191,7 +3191,110 @@ async def get_account_pages(account_id: str, access_token: Optional[str] = None)
             "details": str(e)
         }, indent=2)
 
+@mcp_server.tool()
+@meta_api_tool
+async def get_ad_creative_image_url(ad_id: str, access_token: Optional[str] = None) -> str:
+    """
+    Get a stable, high-resolution image URL for a Meta ad creative.
+    Returns the full-resolution image URL from Meta's adimages endpoint.
 
+    Args:
+        ad_id: Meta Ads ad ID
+        access_token: Meta API access token (optional - will use cached token if not provided)
+
+    Returns:
+        JSON with ad name, image URL, width, height, and performance metrics
+    """
+    if not ad_id:
+        return json.dumps({"error": "No ad ID provided"}, indent=2)
+
+    # Step 1: Get account_id and creative_id from the ad
+    ad_data = await make_api_request(
+        ad_id, access_token,
+        {"fields": "name,account_id,creative{id,image_hash,asset_feed_spec}"}
+    )
+    if "error" in ad_data:
+        return json.dumps({"error": "Could not get ad data", "details": ad_data}, indent=2)
+
+    account_id = ad_data.get("account_id", "")
+    ad_name = ad_data.get("name", "")
+    creative = ad_data.get("creative", {})
+
+    if not account_id:
+        return json.dumps({"error": "No account_id found for this ad"}, indent=2)
+
+    # Step 2: Collect image hashes from creative
+    image_hashes = []
+
+    # Direct image_hash on creative
+    if creative.get("image_hash"):
+        image_hashes.append(creative["image_hash"])
+
+    # Image hashes from asset_feed_spec
+    afs = creative.get("asset_feed_spec", {})
+    for img in afs.get("images", []):
+        if img.get("hash") and img["hash"] not in image_hashes:
+            image_hashes.append(img["hash"])
+
+    # Step 3: If no direct hashes found, get them from adcreatives endpoint
+    if not image_hashes:
+        creative_id = creative.get("id")
+        if creative_id:
+            creative_data = await make_api_request(
+                creative_id, access_token,
+                {"fields": "image_hash,asset_feed_spec,object_story_spec"}
+            )
+            if creative_data.get("image_hash"):
+                image_hashes.append(creative_data["image_hash"])
+            # Check object_story_spec
+            oss = creative_data.get("object_story_spec", {})
+            link_data = oss.get("link_data", {})
+            if link_data.get("image_hash"):
+                image_hashes.append(link_data["image_hash"])
+            # Check asset_feed_spec
+            for img in creative_data.get("asset_feed_spec", {}).get("images", []):
+                if img.get("hash") and img["hash"] not in image_hashes:
+                    image_hashes.append(img["hash"])
+
+    if not image_hashes:
+        return json.dumps({
+            "error": "No image hashes found for this ad",
+            "ad_id": ad_id,
+            "ad_name": ad_name,
+            "hint": "This may be a video ad. Use get_ad_video instead."
+        }, indent=2)
+
+    # Step 4: Resolve hashes to full-resolution URLs via adimages endpoint
+    hashes_str = json.dumps(image_hashes[:3])  # Max 3 hashes
+    image_data = await make_api_request(
+        f"act_{account_id}/adimages",
+        access_token,
+        {"fields": "hash,url,width,height,name", "hashes": hashes_str}
+    )
+
+    if "error" in image_data or not image_data.get("data"):
+        return json.dumps({
+            "error": "Could not resolve image URLs",
+            "details": image_data,
+            "ad_id": ad_id
+        }, indent=2)
+
+    images = []
+    for img in image_data["data"]:
+        images.append({
+            "hash": img.get("hash"),
+            "url": img.get("url"),
+            "width": img.get("width"),
+            "height": img.get("height"),
+            "name": img.get("name"),
+        })
+
+    return json.dumps({
+        "ad_id": ad_id,
+        "ad_name": ad_name,
+        "images": images,
+        "note": "Diese URLs sind an deinen Meta-Account gebunden. Öffne sie im Browser während du bei Facebook eingeloggt bist."
+    }, indent=2)
 
 
 
